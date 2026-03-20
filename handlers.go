@@ -1,0 +1,144 @@
+package main
+
+import (
+	"context"
+	"crypto/rand"
+	"log"
+	"net/http"
+	"os"
+	"strings"
+
+	"github.com/gin-gonic/gin"
+	"google.golang.org/api/idtoken"
+)
+
+// LoginRequest represents the incoming JWT from the client
+type LoginRequest struct {
+	IDToken string `json:"id_token" binding:"required"`
+}
+
+// HandleLogin verifies the Google JWT, ensures the user exists in Headscale,
+// and mints a permanent Pre-Auth Key.
+func HandleLogin(c *gin.Context) {
+	var req LoginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing or invalid id_token"})
+		return
+	}
+
+	clientID := os.Getenv("GOOGLE_CLIENT_ID")
+	
+	// Verify the token
+	payload, err := idtoken.Validate(context.Background(), req.IDToken, clientID)
+	if err != nil {
+		log.Printf("JWT validation failed: %v", err)
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
+		return
+	}
+
+	// Extract email to use as the Headscale username
+	// Headscale usernames must be alphanumeric + hyphens/underscores.
+	// We'll replace '@' and '.' to make it compatible.
+	email, ok := payload.Claims["email"].(string)
+	if !ok || email == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Email not found in token"})
+		return
+	}
+
+	username := sanitizeUsername(email)
+
+	// 1. Attempt to create the user in Headscale (ignore conflict if exists)
+	if err := CreateHeadscaleUser(username); err != nil {
+		log.Printf("Error creating user %s: %v", username, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to sync user with control plane"})
+		return
+	}
+
+	// 2. Mint a permanent Pre-Auth Key for this user
+	authKey, err := CreatePreAuthKey(username, false, nil)
+	if err != nil {
+		log.Printf("Error generating pre-auth key for %s: %v", username, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate auth key"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"username": username,
+		"auth_key": authKey,
+	})
+}
+
+// HandleGuestInvite generates a 6-digit PIN, mints an ephemeral Pre-Auth Key
+// tagged with 'tag:guest', and stores the mapping in RAM for 5 minutes.
+func HandleGuestInvite(c *gin.Context) {
+	// First, ensure a generic "guest" user exists in Headscale to bind these keys to
+	guestUser := "echolink-guests"
+	if err := CreateHeadscaleUser(guestUser); err != nil {
+		log.Printf("Error ensuring guest user exists: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Control plane error"})
+		return
+	}
+
+	// Mint an ephemeral key with the guest tag
+	authKey, err := CreatePreAuthKey(guestUser, true, []string{"tag:guest"})
+	if err != nil {
+		log.Printf("Error generating guest pre-auth key: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate guest key"})
+		return
+	}
+
+	// Generate 6-digit PIN
+	pin := generatePIN(6)
+
+	// Save to in-memory store
+	SavePIN(pin, authKey)
+
+	c.JSON(http.StatusOK, gin.H{
+		"pin": pin,
+		"expires_in_minutes": 5,
+	})
+}
+
+// ClaimRequest represents the guest submitting a PIN
+type ClaimRequest struct {
+	PIN string `json:"pin" binding:"required"`
+}
+
+// HandleGuestClaim validates the PIN and returns the associated Pre-Auth Key,
+// consuming the PIN in the process.
+func HandleGuestClaim(c *gin.Context) {
+	var req ClaimRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing or invalid PIN"})
+		return
+	}
+
+	authKey, found := GetAndRemovePIN(req.PIN)
+	if !found {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Invalid or expired PIN"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"auth_key": authKey,
+	})
+}
+
+// Helper to format email into a valid Headscale username
+func sanitizeUsername(email string) string {
+	s := strings.ReplaceAll(email, "@", "-")
+	s = strings.ReplaceAll(s, ".", "-")
+	return s
+}
+
+// Helper to generate a random numeric PIN
+func generatePIN(length int) string {
+	b := make([]byte, length)
+	if _, err := rand.Read(b); err != nil {
+		return "123456" // Fallback, shouldn't happen
+	}
+	for i := 0; i < length; i++ {
+		b[i] = (b[i] % 10) + 48 // ASCII 0-9
+	}
+	return string(b)
+}
