@@ -1,6 +1,6 @@
 module echolink-middleware
 
-go 1.26.1
+go 1.26
 
 require (
 	cloud.google.com/go/auth v0.18.2 // indirect
