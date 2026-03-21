@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"unicode"
 
 	"github.com/gin-gonic/gin"
 	"google.golang.org/api/idtoken"
@@ -27,7 +28,7 @@ func HandleLogin(c *gin.Context) {
 	}
 
 	clientID := os.Getenv("GOOGLE_CLIENT_ID")
-	
+
 	// Verify the token
 	payload, err := idtoken.Validate(context.Background(), req.IDToken, clientID)
 	if err != nil {
@@ -94,7 +95,7 @@ func HandleGuestInvite(c *gin.Context) {
 	SavePIN(pin, authKey)
 
 	c.JSON(http.StatusOK, gin.H{
-		"pin": pin,
+		"pin":                pin,
 		"expires_in_minutes": 5,
 	})
 }
@@ -126,10 +127,23 @@ func HandleGuestClaim(c *gin.Context) {
 
 // Helper to format email into a valid Headscale username
 func sanitizeUsername(email string) string {
-        s := strings.ReplaceAll(email, "@", "_")
-        s = strings.ReplaceAll(s, ".", "_")
-        return s
+	s := strings.ReplaceAll(email, "@", "_")
+	s = strings.ReplaceAll(s, ".", "_")
+
+	// Headscale requires username to start with a letter.
+	// If it starts with a digit or other character, prepend 'u'
+	if len(s) > 0 && !unicode.IsLetter(rune(s[0])) {
+		s = "u" + s
+	}
+
+	// Headscale requires username to be at least 2 characters long.
+	if len(s) < 2 {
+		s = s + "user"
+	}
+
+	return s
 }
+
 // Helper to generate a random numeric PIN
 func generatePIN(length int) string {
 	b := make([]byte, length)
