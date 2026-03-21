@@ -126,11 +126,10 @@ func HandleGuestClaim(c *gin.Context) {
 
 // Helper to format email into a valid Headscale username
 func sanitizeUsername(email string) string {
-	s := strings.ReplaceAll(email, "@", "-")
-	s = strings.ReplaceAll(s, ".", "-")
-	return s
+        s := strings.ReplaceAll(email, "@", "_")
+        s = strings.ReplaceAll(s, ".", "_")
+        return s
 }
-
 // Helper to generate a random numeric PIN
 func generatePIN(length int) string {
 	b := make([]byte, length)
