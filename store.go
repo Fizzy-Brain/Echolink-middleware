@@ -14,28 +14,23 @@ func InitStore() {
 	pinStore = cache.New(5*time.Minute, 1*time.Minute)
 }
 
-// SavePIN stores a mapping of PIN to the Headscale Pre-Auth Key.
-func SavePIN(pin string, authKey string) {
+// SavePIN stores a mapping of PIN to some data (string or struct).
+func SavePIN(pin string, data interface{}) {
 	// The PIN is valid for exactly 5 minutes
-	pinStore.Set(pin, authKey, 5*time.Minute)
+	pinStore.Set(pin, data, 5*time.Minute)
 }
 
-// GetAndRemovePIN retrieves the Pre-Auth Key for a given PIN, and deletes the PIN
+// GetAndRemovePIN retrieves the data for a given PIN, and deletes the PIN
 // from the store immediately to ensure it's a single-use claim.
-// Returns (authKey, true) if found, or ("", false) if not found or expired.
-func GetAndRemovePIN(pin string) (string, bool) {
+// Returns (data, true) if found, or (nil, false) if not found or expired.
+func GetAndRemovePIN(pin string) (interface{}, bool) {
 	val, found := pinStore.Get(pin)
 	if !found {
-		return "", false
+		return nil, false
 	}
 
 	// Delete immediately to prevent replay claims
 	pinStore.Delete(pin)
 
-	authKey, ok := val.(string)
-	if !ok {
-		return "", false
-	}
-
-	return authKey, true
+	return val, true
 }

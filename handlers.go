@@ -18,6 +18,13 @@ type LoginRequest struct {
 	IDToken string `json:"id_token" binding:"required"`
 }
 
+// PairData represents the data exchanged between logged-in users via PIN.
+type PairData struct {
+	IpAddress string `json:"ip_address" binding:"required"`
+	PublicKey string `json:"public_key" binding:"required"`
+	Hostname  string `json:"hostname" binding:"required"`
+}
+
 // HandleLogin verifies the Google JWT, ensures the user exists in Headscale,
 // and mints a permanent Pre-Auth Key.
 func HandleLogin(c *gin.Context) {
@@ -114,15 +121,64 @@ func HandleGuestClaim(c *gin.Context) {
 		return
 	}
 
-	authKey, found := GetAndRemovePIN(req.PIN)
+	val, found := GetAndRemovePIN(req.PIN)
 	if !found {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Invalid or expired PIN"})
+		return
+	}
+
+	authKey, ok := val.(string)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "PIN does not match a Guest Pre-Auth Key"})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"auth_key": authKey,
 	})
+}
+
+// HandlePairCreate receives PairData from Host, generates a 6-digit PIN, and saves to store.
+func HandlePairCreate(c *gin.Context) {
+	var data PairData
+	if err := c.ShouldBindJSON(&data); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid or missing PairData"})
+		return
+	}
+
+	// Generate 6-digit PIN
+	pin := generatePIN(6)
+
+	// Save to in-memory store
+	SavePIN(pin, data)
+
+	c.JSON(http.StatusOK, gin.H{
+		"pin":                pin,
+		"expires_in_minutes": 5,
+	})
+}
+
+// HandlePairClaim receives PIN, returns PairData to Client.
+func HandlePairClaim(c *gin.Context) {
+	var req ClaimRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing or invalid PIN"})
+		return
+	}
+
+	val, found := GetAndRemovePIN(req.PIN)
+	if !found {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Invalid or expired PIN"})
+		return
+	}
+
+	data, ok := val.(PairData)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "PIN does not match an authenticated pair request"})
+		return
+	}
+
+	c.JSON(http.StatusOK, data)
 }
 
 // Helper to format email into a valid Headscale username

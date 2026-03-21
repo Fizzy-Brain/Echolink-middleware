@@ -37,11 +37,17 @@ func main() {
 	auth := router.Group("/auth")
 	{
 		auth.POST("/login", HandleLogin)
-		
+
 		guest := auth.Group("/guest")
 		{
 			guest.POST("/invite", HandleGuestInvite)
 			guest.POST("/claim", HandleGuestClaim)
+		}
+
+		pair := auth.Group("/pair")
+		{
+			pair.POST("/create", HandlePairCreate)
+			pair.POST("/claim", HandlePairClaim)
 		}
 	}
 
