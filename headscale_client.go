@@ -1,19 +1,44 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
-	"os"
-	"time"
+        "bytes"
+        "encoding/json"
+        "fmt"
+        "io"
+        "net/http"
+        "os"
+        "time"
 )
 
-// CreateHeadscaleUser attempts to create a user in Headscale and returns their string/uint64 ID.
+// CreateHeadscaleUser attempts to create a user in Headscale.
 func CreateHeadscaleUser(username string) error {
-        url := fmt.Sprintf("%s/api/v1/user", os.Getenv("HEADSCALE_URL"))
+        // 1. FIRST, check if user exists to avoid the UNIQUE constraint error
+        checkUrl := fmt.Sprintf("%s/api/v1/user", os.Getenv("HEADSCALE_URL"))
+        checkReq, _ := http.NewRequest("GET", checkUrl, nil)
+        checkReq.Header.Set("Authorization", "Bearer "+os.Getenv("HEADSCALE_API_KEY"))
 
+        client := &http.Client{Timeout: 10 * time.Second}
+        checkResp, err := client.Do(checkReq)
+        if err == nil {
+                defer checkResp.Body.Close()
+                if checkResp.StatusCode == http.StatusOK {
+                        var result struct {
+                                Users []struct {
+                                        Name string `json:"name"`
+                                } `json:"users"`
+                        }
+                        if json.NewDecoder(checkResp.Body).Decode(&result) == nil {
+                                for _, u := range result.Users {
+                                        if u.Name == username {
+                                                return nil // User already exists, we are good!
+                                        }
+                                }
+                        }
+                }
+        }
+
+        // 2. ONLY IF NOT FOUND, create them
+        url := fmt.Sprintf("%s/api/v1/user", os.Getenv("HEADSCALE_URL"))
         payload := map[string]string{
                 "name": username,
         }
@@ -27,7 +52,6 @@ func CreateHeadscaleUser(username string) error {
         req.Header.Set("Authorization", "Bearer "+os.Getenv("HEADSCALE_API_KEY"))
         req.Header.Set("Content-Type", "application/json")
 
-        client := &http.Client{Timeout: 10 * time.Second}
         resp, err := client.Do(req)
         if err != nil {
                 return err
@@ -51,33 +75,17 @@ func CreatePreAuthKey(username string, ephemeral bool, tags []string) (string, e
                 expiration = time.Now().Add(1 * time.Hour).Format(time.RFC3339)
         }
 
-        // Headscale v0.22/0.23 API transition:
-        // Try passing the username string in the "user" field.
-        // If the protobuf complains it wants a uint64, it means the API is actually
-        // expecting "user" to be a string name in newer versions, but the error
-        // 'invalid value for uint64 field user' strongly implies it's an older
-        // headscale version or specific fork where the field maps to user_id.
-        // Actually, in Headscale v0.23, you pass the string username in the "user" query param
-        // for GET requests, but for POST it might want `user` as string.
-        // Let's pass the username string, but if it fails, maybe we need `namespace`?
-        // Wait, the error explicitly said: `invalid value for uint64 field user: "nameless..."`
-        // Let's fetch the user ID first!
-
         userID, err := getHeadscaleUserID(username)
         if err != nil {
             return "", fmt.Errorf("could not get user ID: %v", err)
         }
 
         payload := map[string]interface{}{
-                "user":       username, // In some versions this must be string
-                "user_id":    userID,   // In some versions it expects user_id
+                "user":       userID, // Send the parsed interface ID (string or number depending on Headscale version)
                 "reusable":   false,
                 "ephemeral":  ephemeral,
                 "expiration": expiration,
         }
-        // If the proto explicitly complained about `uint64 field user`, we MUST send a number in `user`.
-        // Let's overwrite "user" with the numeric ID.
-        payload["user"] = userID
 
         if len(tags) > 0 {
                 payload["acl_tags"] = tags
@@ -100,9 +108,29 @@ func CreatePreAuthKey(username string, ephemeral bool, tags []string) (string, e
         defer resp.Body.Close()
 
         if resp.StatusCode != http.StatusOK {
-                // If it failed because it actually expected a string in "user", let's try fallback to string "user"
-                // but the original error was `uint64 field user`.
+                // Fallback: If it failed because it actually expected a string in "user", try passing username directly.
                 respBody, _ := io.ReadAll(resp.Body)
+                if bytes.Contains(respBody, []byte("invalid value")) || bytes.Contains(respBody, []byte("type")) {
+                        payload["user"] = username
+                        body, _ = json.Marshal(payload)
+                        req, _ = http.NewRequest("POST", url, bytes.NewBuffer(body))
+                        req.Header.Set("Authorization", "Bearer "+os.Getenv("HEADSCALE_API_KEY"))
+                        req.Header.Set("Content-Type", "application/json")
+                        resp2, err2 := client.Do(req)
+                        if err2 == nil {
+                                defer resp2.Body.Close()
+                                if resp2.StatusCode == http.StatusOK {
+                                        var result struct {
+                                                PreAuthKey struct {
+                                                        Key string `json:"key"`
+                                                } `json:"preAuthKey"`
+                                        }
+                                        if err := json.NewDecoder(resp2.Body).Decode(&result); err == nil {
+                                                return result.PreAuthKey.Key, nil
+                                        }
+                                }
+                        }
+                }
                 return "", fmt.Errorf("headscale key generation failed with status %d: %s", resp.StatusCode, string(respBody))
         }
 
@@ -119,8 +147,7 @@ func CreatePreAuthKey(username string, ephemeral bool, tags []string) (string, e
         return result.PreAuthKey.Key, nil
 }
 
-func getHeadscaleUserID(username string) (uint64, error) {
-        // We can list all users and find the matching one to get its ID
+func getHeadscaleUserID(username string) (interface{}, error) {
         url := fmt.Sprintf("%s/api/v1/user", os.Getenv("HEADSCALE_URL"))
         req, _ := http.NewRequest("GET", url, nil)
         req.Header.Set("Authorization", "Bearer "+os.Getenv("HEADSCALE_API_KEY"))
@@ -128,24 +155,23 @@ func getHeadscaleUserID(username string) (uint64, error) {
         client := &http.Client{Timeout: 10 * time.Second}
         resp, err := client.Do(req)
         if err != nil {
-            return 0, err
+            return nil, err
         }
         defer resp.Body.Close()
 
         if resp.StatusCode != http.StatusOK {
-            return 0, fmt.Errorf("failed to list users: %d", resp.StatusCode)
+            return nil, fmt.Errorf("failed to list users: %d", resp.StatusCode)
         }
 
         var result struct {
             Users []struct {
-                ID uint64 `json:"id"`
-                // Sometimes it's a string ID, but proto error said uint64
+                ID interface{} `json:"id"` // Safely handle both uint64 and string ID formats returned by varying Headscale versions
                 Name string `json:"name"`
             } `json:"users"`
         }
 
         if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-            return 0, err
+            return nil, err
         }
 
         for _, u := range result.Users {
@@ -154,5 +180,5 @@ func getHeadscaleUserID(username string) (uint64, error) {
             }
         }
 
-        return 0, fmt.Errorf("user %s not found after creation", username)
+        return nil, fmt.Errorf("user %s not found after creation", username)
 }
