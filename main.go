@@ -36,7 +36,8 @@ func main() {
         // Setup routes
         auth := router.Group("/auth")
         {
-                auth.POST("/login", HandleLogin)
+                auth.GET("/login", HandleLogin)
+                auth.GET("/callback", HandleCallback)
                 auth.POST("/node/delete", HandleDeleteNode)
 
                 guest := auth.Group("/guest")
