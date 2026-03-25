@@ -40,8 +40,12 @@ type PairData struct {
 
 // HandleLogin redirects the user to Google OAuth consent page
 func HandleLogin(c *gin.Context) {
-	// In production, state should be random and verified
-	state := "random-state-string"
+	port := c.Query("port")
+	state := "device=android"
+	if port != "" {
+		state = fmt.Sprintf("device=pc&port=%s", port)
+	}
+	// In production, state should be random and verified, but here we use it to pass context
 	url := oauthConfig.AuthCodeURL(state)
 	c.Redirect(http.StatusFound, url)
 }
@@ -49,6 +53,8 @@ func HandleLogin(c *gin.Context) {
 // HandleCallback receives the OAuth code, gets user info, and deep links back
 func HandleCallback(c *gin.Context) {
 	code := c.Query("code")
+	state := c.Query("state") // Retrieve state to know where to redirect
+
 	if code == "" {
 		c.String(http.StatusBadRequest, "No code in request")
 		return
@@ -100,8 +106,27 @@ func HandleCallback(c *gin.Context) {
 		return
 	}
 
-	// Create the deep link URL
-	redirectUrl := fmt.Sprintf("echolink://login?authkey=%s&username=%s", authKey, username)
+	// Determine redirect based on state
+	var redirectUrl string
+	if strings.Contains(state, "device=pc") && strings.Contains(state, "port=") {
+		// Extract port from state
+		parts := strings.Split(state, "&")
+		var port string
+		for _, p := range parts {
+			if strings.HasPrefix(p, "port=") {
+				port = strings.TrimPrefix(p, "port=")
+				break
+			}
+		}
+		if port != "" {
+			redirectUrl = fmt.Sprintf("http://127.0.0.1:%s/?key=%s", port, authKey)
+		} else {
+			redirectUrl = fmt.Sprintf("echolink://login?authkey=%s&username=%s", authKey, username)
+		}
+	} else {
+		// Android / Default
+		redirectUrl = fmt.Sprintf("echolink://login?authkey=%s&username=%s", authKey, username)
+	}
 
 	// Redirect the user's browser to the deep link
 	c.Redirect(http.StatusFound, redirectUrl)
