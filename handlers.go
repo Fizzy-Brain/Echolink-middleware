@@ -36,6 +36,7 @@ type PairData struct {
 	IpAddress string `json:"ip_address" binding:"required"`
 	PublicKey string `json:"public_key" binding:"required"`
 	Hostname  string `json:"hostname" binding:"required"`
+	NodeId    string `json:"node_id"`
 }
 
 // HandleLogin redirects the user to Google OAuth consent page
